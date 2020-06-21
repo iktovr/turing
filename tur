@@ -1,0 +1,380 @@
+#!/bin/bash
+
+# tur [-h | --help] [-C | -I] [-o file] [-t | --trace] file [- | input]
+# tur -I [-t | --trace] file [- | input]
+# tur -C [-o file] file
+# compile_file [-t | --trace] [- | input]
+
+function show_help {
+	echo 'Usage: tur [MODE] [OPTIONS] FILE [INPUT]
+Usage: compile_file [-t | --trace] [INPUT]
+
+With no INPUT, read standard input.
+
+Working modes:
+  -I            Interpretation mode (default).
+  -C            Compilation mode.
+  
+Options:
+  -h, --help    Show this message.
+  -t, --trace   Show tape after every step.
+  -o <file>     Place the output into <file>. Default filename is outXXX.sh
+
+Usage:
+  tur -I [-t | --trace] file [input]
+  tur -C [-o <file>] file'
+}
+
+function error {
+	del_file=$2
+	if [ "$del_file" == 1 ]; then
+		rm $infile
+	fi
+	echo $1 >&2
+	exit 1
+}
+
+function show {
+	local tape=( `echo $1` )
+	local wc=$2
+	if [ ${tape[$wc]} = _ ] ; then
+		tape[$wc]=" "
+	fi
+	#tape[$wc]="\e[4m${tape[$wc]}\e[0m"
+	tape[$wc]="_${tape[$wc]}_"
+	for (( j=0; j<=${#tape[*]}; j++ )) ; do
+		if [ "${tape[$j]}" = _ ] ; then
+			tape[$j]=" "
+		fi
+		echo -e -n "${tape[$j]}"
+	done
+	echo
+}
+
+count=$#
+trace=0
+mod=0
+while [ $count -gt 0 ] ; do
+	case $1 in
+		-h|--help)
+			show_help
+			exit 0
+			;;
+		-I)
+			if [ $mod != 0 ] ; then
+				error "Syntax error"
+			fi
+			mod=i
+			count=$[ $count - 1 ]
+			shift
+			;;
+		-C)
+			if [ $mod != 0 ] ; then
+				error "Syntax error"
+			fi
+			mod=c
+			count=$[ $count - 1 ]
+			shift
+			;;
+		-t|--trace)
+			trace=1
+			count=$[ $count - 1 ]
+			shift
+			;;
+		-o)
+			outfile=$2
+			shift
+			shift
+			count=$[ $count - 2 ]
+			;;
+		*)
+			break
+	esac
+done
+
+if [ $mod = 0 ]; then
+	mod=i
+fi
+
+if [ $count -eq 0 ] ; then
+	error "No input file"
+fi
+
+infile=$1
+shift
+count=$[ $count - 1 ]
+if ! [ -r $infile ]; then
+	error "Input file $infile does not exist"
+fi
+if ! [ -s $infile ]; then
+	error "Input file $infile is empty"
+fi
+
+if [ $mod = i ] ; then
+	if [ $count -eq 1 ] ; then
+		input=$1
+		# if [ $input = "-" ] ; then
+		# 	input=""
+		# fi
+	else
+		read input
+	fi
+	input=`echo $input | tr " " "_"`
+fi
+
+if [[ $mod = c && $outfile = "" ]] ; then
+	outfile=`mktemp outXXX.sh`
+fi
+
+intemp=`mktemp ${infile}XXX`
+sort $infile | tr " " "_" | grep -v -e "^//*" -e "^$" > $intemp
+infile=$intemp
+unset intemp
+
+if [ `grep -E -c -v "^[0-9]+,[0-9a-zA-z_],[><#=0-9a-zA-z_],[0-9]+$" < $infile` != 0 ] ; then
+	error "Syntax error in line `grep -E -v "^[0-9]+,[0-9a-zA-z_],[><#=0-9a-zA-z_],[0-9]+$" < $infile | head -1`" "1"
+fi
+
+# interpret trace infile input
+function interpret {
+	local trace=$1
+	local infile=$2
+	local input=$3
+
+	local tape[0]="_"
+	for (( i=1; i<=${#input}; i++ )); do
+		tape[$i]=${input:$[ $i - 1 ]:1}
+	done
+	tape[${#tape[*]}]="_"
+
+	q0=`cat $infile | head -1 | cut -d , -f 1`
+	end=0
+	wc=$[ ${#tape[@]} - 1 ]
+
+	show "`echo ${tape[*]}`" $wc
+
+	program=`cat $infile`
+
+	while [ $end -eq 0 ] ; do
+		for command in $program ; do
+			local i=0
+			local q1=""
+			local a=""
+			local v=""
+			local q2=""
+			while [ ${command:$i:1} != "," ] ; do
+				q1=$q1${command:$i:1}
+				i=$[ $i + 1 ]
+			done
+			i=$[ $i + 1 ]
+			while [ ${command:$i:1} != "," ] ; do
+				a=$a${command:$i:1}
+				i=$[ $i + 1 ]
+			done
+			i=$[ $i + 1 ]
+			while [ ${command:$i:1} != "," ] ; do
+				v=$v${command:$i:1}
+				i=$[ $i + 1 ]
+			done
+			i=$[ $i + 1 ]
+			while [[ $i -lt ${#command} && ${command:$i:1} != "," ]] ; do
+				q2=$q2${command:$i:1}
+				i=$[ $i + 1 ]
+			done
+
+			# set `echo $command | tr "," " "`
+			# local q1=$1
+			# local a=$2
+			# local v=$3
+			# local q2=$4
+
+			if [[ $q0 != $q1 || ${tape[$wc]} != $a ]] ; then
+				continue
+			fi
+	
+			case $v in
+				\>)
+					wc=$[ $wc + 1 ]
+					if [ "${tape[$wc]}" = "" ] ; then
+						tape[$wc]="_"
+					fi
+					;;
+				\<)
+					if [ $wc = 0 ] ; then
+						error "Out of tape. Line $command" "1"
+					fi
+					wc=$[ $wc - 1 ]
+					;;
+				\#)
+					end=1
+					;;
+				\=)
+					;;
+				*)
+					tape[$wc]=$v
+					;;
+			esac
+
+			q0=$q2
+			break
+		done
+
+		if [ $trace -eq 1 ] ; then
+			show "`echo ${tape[*]}`" $wc
+		fi
+	done
+
+	if [ $trace -eq 0 ] ; then
+		show "`echo ${tape[*]}`" $wc
+	fi
+}
+
+# compile outfile infile
+function compile {
+	local outfile=$1
+	local infile=$2
+
+	if [ -e $outfile ] ; then
+		echo -n "File ${outfile} is not empty, owerwrite it? [y/n]: "
+		read ans
+		if [ $ans = "y" ] ; then
+			> $outfile
+		else
+			outfile=`mktemp ${outfile}XXX`
+			echo "New filename is ${outfile}"
+		fi
+	fi
+
+	echo '#!/bin/bash
+function error {
+	echo $1 >&2
+	exit 1
+}
+
+function show {
+	local tape=( `echo $1` )
+	local wc=$2
+	if [ ${tape[$wc]} = _ ] ; then
+		tape[$wc]=" "
+	fi
+	tape[$wc]="\e[4m${tape[$wc]}\e[0m"
+
+	for (( j=0; j<=${#tape[*]}; j++ )) ; do
+		if [ "${tape[$j]}" = _ ] ; then
+			tape[$j]=" "
+		fi
+		echo -e -n "${tape[$j]}"
+	done
+	echo
+}
+
+if [[ $1 = "-t" || $1 = "-trace" ]] ; then
+	trace=1
+	shift
+else
+	trace=0
+fi
+
+if [ $# -ge 1 ] ; then
+	input=$1
+else
+	read input
+fi
+input=`echo $input | tr " " "_"`
+
+tape[0]="_"
+for (( i=1; i<=${#input}; i++ )); do
+	tape[$i]=${input:$[ $i - 1 ]:1}
+done
+tape[${#tape[*]}]="_"' >> $outfile
+echo "q=`cat $infile | head -1 | cut -d , -f 1`" >> $outfile
+echo 'end=0
+wc=$[ ${#tape[@]} - 1 ]
+show "`echo ${tape[*]}`" $wc
+
+while [ $end -eq 0 ] ; do
+	case $q in
+-1)' >> $outfile
+	
+	q0=-1
+	while read command ; do
+		local i=0
+		local q1=""
+		local a=""
+		local v=""
+		local q2=""
+		while [ ${command:$i:1} != "," ] ; do
+			q1=$q1${command:$i:1}
+			i=$[ $i + 1 ]
+		done
+		i=$[ $i + 1 ]
+		while [ ${command:$i:1} != "," ] ; do
+			a=$a${command:$i:1}
+			i=$[ $i + 1 ]
+		done
+		i=$[ $i + 1 ]
+		while [ ${command:$i:1} != "," ] ; do
+			v=$v${command:$i:1}
+			i=$[ $i + 1 ]
+		done
+		i=$[ $i + 1 ]
+		while [[ $i -lt ${#command} && ${command:$i:1} != "," ]] ; do
+			q2=$q2${command:$i:1}
+			i=$[ $i + 1 ]
+		done
+
+		if ! [ $q0 = $q1 ] ; then
+			echo -e ";;\n$q1)" >> $outfile
+		fi
+
+		echo "if [ \${tape[\$wc]} = \"$a\" ] ; then" >> $outfile
+
+		case $v in
+			\>)
+				echo 'wc=$[ $wc + 1 ]
+if [ "${tape[$wc]}" = "" ] ; then
+	tape[$wc]="_"
+fi' >> $outfile
+				;;
+			\<)
+				echo "if [ \$wc = 0 ] ; then
+	error \"Out of tape. Line $q1,$a,$v,$q2\"
+fi
+wc=\$[ \$wc - 1 ]" >> $outfile
+				;;
+			\#)
+				echo 'end=1' >> $outfile
+				;;
+			\=)
+				;;
+			*)
+				echo "tape[\$wc]=\"$v\"" >> $outfile
+				;;
+		esac
+
+		echo "q=$q2" >> $outfile
+		echo 'if [ $trace -eq 1 ] ; then
+	show "`echo ${tape[*]}`" $wc
+fi
+continue
+fi' >> $outfile
+		q0=$q1
+	done < $infile
+
+	echo ';;
+esac
+done
+if [ $trace -eq 0 ] ; then
+	show "`echo ${tape[*]}`" $wc
+fi' >> $outfile
+
+	chmod +x $outfile
+}
+
+if [ $mod = i ] ; then
+	interpret $trace $infile "$input"
+else
+	compile $outfile $infile
+fi
+
+rm $infile
